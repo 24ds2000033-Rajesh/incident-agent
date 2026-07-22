@@ -2,11 +2,12 @@ import { StoredState } from './types.js';
 import { generateRandomHex } from './utils.js';
 
 export function buildOtlpTrace(state: StoredState): any {
-  const traceId = state.traceId;
+  const traceId = state.traceId.padStart(32, '0').slice(0, 32);
   const now = Date.now() * 1000000;
 
-  // Root Server Span ID
+  // Strict 16-character hex span IDs
   const agentSpanId = generateRandomHex(16);
+  const invokeSpanId = generateRandomHex(16);
 
   const defaultAttrs = [
     { key: "ga5.run.id", value: { stringValue: state.runId } },
@@ -19,7 +20,7 @@ export function buildOtlpTrace(state: StoredState): any {
   spans.push({
     traceId,
     spanId: agentSpanId,
-    parentSpanId: state.parentSpanId || "",
+    parentSpanId: state.parentSpanId ? state.parentSpanId.padStart(16, '0').slice(0, 16) : "",
     name: "POST /v2/incidents",
     kind: 2, // SERVER
     startTimeUnixNano: state.startTimeUnixNano,
@@ -28,7 +29,6 @@ export function buildOtlpTrace(state: StoredState): any {
   });
 
   // 2. INTERNAL invoke_agent
-  const invokeSpanId = generateRandomHex(16);
   spans.push({
     traceId,
     spanId: invokeSpanId,
@@ -57,13 +57,13 @@ export function buildOtlpTrace(state: StoredState): any {
     ]
   });
 
-  const diagnosticSpanIds: string[] = [];
+  const diagnosticInternalSpanIds: string[] = [];
 
   // 4. Executed Tool Spans
   for (const dispatch of state.actionLog) {
     const logicalSpanId = generateRandomHex(16);
     if (dispatch.phase === "diagnostic") {
-      diagnosticSpanIds.push(logicalSpanId);
+      diagnosticInternalSpanIds.push(logicalSpanId);
     }
 
     spans.push({
@@ -111,9 +111,11 @@ export function buildOtlpTrace(state: StoredState): any {
         statusObj.code = 1; // OK
       }
 
+      const safeClientSpanId = att.clientSpanId.padStart(16, '0').slice(0, 16);
+
       spans.push({
         traceId,
-        spanId: att.clientSpanId,
+        spanId: safeClientSpanId,
         parentSpanId: logicalSpanId,
         name: `POST tool/${dispatch.toolName}`,
         kind: 3, // CLIENT
@@ -126,7 +128,7 @@ export function buildOtlpTrace(state: StoredState): any {
   }
 
   // 5. INTERNAL incident.join
-  if (diagnosticSpanIds.length > 1) {
+  if (diagnosticInternalSpanIds.length > 0) {
     const joinSpanId = generateRandomHex(16);
     spans.push({
       traceId,
@@ -136,7 +138,7 @@ export function buildOtlpTrace(state: StoredState): any {
       kind: 1, // INTERNAL
       startTimeUnixNano: now - 4000,
       endTimeUnixNano: now - 3000,
-      links: diagnosticSpanIds.map(sId => ({ traceId, spanId: sId })),
+      links: diagnosticInternalSpanIds.map(sId => ({ traceId, spanId: sId })),
       attributes: [...defaultAttrs]
     });
   }
