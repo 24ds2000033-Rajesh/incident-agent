@@ -20,17 +20,17 @@ export async function runModelPlanner(payload: IncidentPayload): Promise<Planner
   }
 
   const systemPrompt = `You are an incident response agent. Analyze the provided incident transcript and tool catalog.
-Return ONLY valid JSON matching this schema:
+Return ONLY a valid JSON object matching this schema without markdown formatting:
 {
   "diagnosis": {
-    "rootCause": "<string from allowedRootCauses>",
+    "rootCause": "<exact cause from allowedRootCauses>",
     "evidence": ["<evidenceId_1>", "<evidenceId_2>"]
   },
   "diagnosticCalls": [
     {
       "toolName": "<toolName>",
       "arguments": { ... },
-      "evidence": ["<evidenceId>"]
+      "evidence": ["<evidenceId_1>"]
     }
   ],
   "suggestedEffect": {
@@ -39,11 +39,11 @@ Return ONLY valid JSON matching this schema:
   }
 }
 
-Constraints:
+Rules:
 1. rootCause MUST be chosen from allowedRootCauses.
-2. evidence MUST cite 2 to 4 distinct evidence line IDs from the transcript (e.g. "ev_123").
-3. Include at most ${payload.policy.maximumDiagnostics} diagnostic tool calls. Each diagnostic call must cite at least one evidence ID.
-4. suggestedEffect MUST be one effect tool from toolCatalog to fix the issue. Do NOT include markdown blocks.`;
+2. evidence MUST cite 2 to 4 evidence line IDs found in brackets in transcript (e.g., "ev_101").
+3. Include 1 to ${payload.policy.maximumDiagnostics} diagnostic tool calls. Every diagnostic dispatch must cite at least one evidence ID from diagnosis.evidence.
+4. suggestedEffect MUST be one effect tool from toolCatalog to fix the root cause.`;
 
   const userContent = `
 Allowed Root Causes:
@@ -58,7 +58,6 @@ Transcript:
 ${payload.incident.transcript}
 `;
 
-  // Model choice: openai/gpt-4.1-nano or openai/gpt-4o-mini via AI Pipe
   const modelName = process.env.MODEL_NAME || "openai/gpt-4.1-nano";
 
   const response = await fetch("https://aipipe.org/openrouter/v1/chat/completions", {
@@ -73,7 +72,6 @@ ${payload.incident.transcript}
         { role: "system", content: systemPrompt },
         { role: "user", content: userContent }
       ],
-      response_format: { type: "json_object" },
       temperature: 0.0
     })
   });
@@ -85,7 +83,7 @@ ${payload.incident.transcript}
 
   const json: any = await response.json();
   const rawContent = json.choices?.[0]?.message?.content || "";
-  const cleanJson = rawContent.replace(/```json/g, "").replace(/```/g, "").trim();
+  const cleanJson = rawContent.replace(/```json/gi, "").replace(/```/g, "").trim();
 
   return JSON.parse(cleanJson);
 }
