@@ -1,9 +1,12 @@
 import { StoredState } from './types.js';
+import { generateRandomHex } from './utils.js';
 
 export function buildOtlpTrace(state: StoredState): any {
-  const agentSpanId = state.runId.slice(0, 16).padStart(16, 'a');
   const traceId = state.traceId;
   const now = Date.now() * 1000000;
+
+  // Root Server Span ID
+  const agentSpanId = generateRandomHex(16);
 
   const defaultAttrs = [
     { key: "ga5.run.id", value: { stringValue: state.runId } },
@@ -25,7 +28,7 @@ export function buildOtlpTrace(state: StoredState): any {
   });
 
   // 2. INTERNAL invoke_agent
-  const invokeSpanId = "inv_" + agentSpanId.slice(4);
+  const invokeSpanId = generateRandomHex(16);
   spans.push({
     traceId,
     spanId: invokeSpanId,
@@ -38,7 +41,7 @@ export function buildOtlpTrace(state: StoredState): any {
   });
 
   // 3. CLIENT chat incident-plan
-  const chatSpanId = "chat_" + agentSpanId.slice(5);
+  const chatSpanId = generateRandomHex(16);
   spans.push({
     traceId,
     spanId: chatSpanId,
@@ -54,13 +57,13 @@ export function buildOtlpTrace(state: StoredState): any {
     ]
   });
 
-  const diagnosticActionIds: string[] = [];
+  const diagnosticSpanIds: string[] = [];
 
   // 4. Executed Tool Spans
   for (const dispatch of state.actionLog) {
-    const logicalSpanId = dispatch.actionId.slice(0, 16).padStart(16, 'b');
+    const logicalSpanId = generateRandomHex(16);
     if (dispatch.phase === "diagnostic") {
-      diagnosticActionIds.push(logicalSpanId);
+      diagnosticSpanIds.push(logicalSpanId);
     }
 
     spans.push({
@@ -123,8 +126,8 @@ export function buildOtlpTrace(state: StoredState): any {
   }
 
   // 5. INTERNAL incident.join
-  if (diagnosticActionIds.length > 1) {
-    const joinSpanId = "join_" + agentSpanId.slice(5);
+  if (diagnosticSpanIds.length > 1) {
+    const joinSpanId = generateRandomHex(16);
     spans.push({
       traceId,
       spanId: joinSpanId,
@@ -133,7 +136,7 @@ export function buildOtlpTrace(state: StoredState): any {
       kind: 1, // INTERNAL
       startTimeUnixNano: now - 4000,
       endTimeUnixNano: now - 3000,
-      links: diagnosticActionIds.map(sId => ({ traceId, spanId: sId })),
+      links: diagnosticSpanIds.map(sId => ({ traceId, spanId: sId })),
       attributes: [...defaultAttrs]
     });
   }
@@ -141,7 +144,7 @@ export function buildOtlpTrace(state: StoredState): any {
   // 6. INTERNAL approval_gate
   for (const r of state.receiptLog) {
     if (r.approvalId) {
-      const appSpanId = "appr_" + r.approvalId.slice(0, 11).padStart(11, 'c');
+      const appSpanId = generateRandomHex(16);
       spans.push({
         traceId,
         spanId: appSpanId,
