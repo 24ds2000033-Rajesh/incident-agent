@@ -12,12 +12,17 @@ const stateStore = new Map<string, StoredState>();
 const receiptStore = new Map<string, string>();
 
 function sendJsonResponse(res: http.ServerResponse, statusCode: number, data: any) {
-  const body = JSON.stringify(data);
-  res.writeHead(statusCode, {
-    'Content-Type': 'application/json',
-    'Content-Length': Buffer.byteLength(body)
-  });
-  res.end(body);
+  try {
+    const body = JSON.stringify(data);
+    res.writeHead(statusCode, {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(body)
+    });
+    res.end(body);
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: "Failed to serialize response" }));
+  }
 }
 
 function cleanResponse(state: StoredState) {
@@ -29,9 +34,9 @@ function cleanResponse(state: StoredState) {
       status: state.status,
       diagnosis: state.diagnosis,
       chosenEffect: state.chosenEffect,
-      suppressed: state.suppressed,
-      actionLog: state.actionLog,
-      receiptLog: state.receiptLog,
+      suppressed: state.suppressed || [],
+      actionLog: state.actionLog || [],
+      receiptLog: state.receiptLog || [],
       otlp
     };
   }
@@ -40,8 +45,8 @@ function cleanResponse(state: StoredState) {
     runId: state.runId,
     status: state.status,
     diagnosis: state.diagnosis,
-    dispatches: state.dispatches,
-    approvals: state.approvals
+    dispatches: state.dispatches || [],
+    approvals: state.approvals || []
   };
 }
 
@@ -53,32 +58,33 @@ const server = http.createServer(async (req, res) => {
   req.on('data', chunk => { bodyText += chunk; });
   req.on('end', async () => {
     try {
-      // POST /v2/incidents
+      // Route: POST /v2/incidents
       if (method === 'POST' && req.url === '/v2/incidents') {
-        let payload: IncidentPayload;
+        let payload: Partial<IncidentPayload>;
         try {
           payload = JSON.parse(bodyText || '{}');
         } catch {
-          return sendJsonResponse(res, 400, { error: "Invalid JSON body" });
+          return sendJsonResponse(res, 400, { error: "Invalid JSON format" });
         }
 
-        // 1. Validation Probe: Profile Check
+        // Probe Check 1: Supported profile check (422)
         if (!payload.profile || payload.profile !== "ga5-incident-agent/v2") {
-          return sendJsonResponse(res, 422, { error: "Unsupported profile" });
+          return sendJsonResponse(res, 422, { error: "Unsupported profile string" });
         }
 
-        // 2. Validation Probe: Required Fields Check
+        // Probe Check 2: Schema validation (400)
         if (!payload.runId || !payload.incident || !payload.policy) {
-          return sendJsonResponse(res, 400, { error: "Missing required incident fields" });
+          return sendJsonResponse(res, 400, { error: "Missing required fields: runId, incident, or policy" });
         }
 
-        const incomingHash = computeSHA256Hex(payload);
+        const fullPayload = payload as IncidentPayload;
+        const incomingHash = computeSHA256Hex(fullPayload);
 
-        // 3. Validation Probe: Conflict Check (HTTP 409)
-        if (stateStore.has(payload.runId)) {
-          const existing = stateStore.get(payload.runId)!;
+        // Probe Check 3: Duplicate runId conflict check (409)
+        if (stateStore.has(fullPayload.runId)) {
+          const existing = stateStore.get(fullPayload.runId)!;
           if (existing.incomingHash !== incomingHash) {
-            return sendJsonResponse(res, 409, { error: "Conflict: runId already exists with a different payload" });
+            return sendJsonResponse(res, 409, { error: "Conflict: runId already registered with a different payload" });
           }
           return sendJsonResponse(res, 200, cleanResponse(existing));
         }
@@ -87,27 +93,23 @@ const server = http.createServer(async (req, res) => {
         const traceCtx = parseTraceparent(req.headers['traceparent'] as string);
 
         const modelStart = getCurrentUnixNano();
-        let plan;
-        try {
-          plan = await runModelPlanner(payload);
-        } catch (planError: any) {
-          return sendJsonResponse(res, 500, { error: `Planner failure: ${planError.message}` });
-        }
+        const plan = await runModelPlanner(fullPayload);
         const modelEnd = getCurrentUnixNano();
 
         const pendingDiagnostics = new Map();
         const dispatches: Dispatch[] = [];
 
-        plan.diagnosticCalls.slice(0, payload.policy.maximumDiagnostics).forEach((call, idx) => {
-          const actionId = `act_diag_${payload.runId.slice(0, 8)}_${idx}_${generateRandomHex(8)}`;
-          const callId = `call_diag_${payload.runId.slice(0, 8)}_${idx}_${generateRandomHex(8)}`;
+        const maxDiags = fullPayload.policy.maximumDiagnostics ?? 1;
+        (plan.diagnosticCalls || []).slice(0, maxDiags).forEach((call, idx) => {
+          const actionId = `act_diag_${fullPayload.runId.slice(0, 8)}_${idx}_${generateRandomHex(8)}`;
+          const callId = `call_diag_${fullPayload.runId.slice(0, 8)}_${idx}_${generateRandomHex(8)}`;
           const clientSpanId = generateRandomHex(16);
 
           pendingDiagnostics.set(actionId, {
             callId,
             toolName: call.toolName,
-            arguments: call.arguments,
-            evidence: call.evidence
+            arguments: call.arguments || {},
+            evidence: call.evidence || []
           });
 
           const traceparent = formatTraceparent(traceCtx.traceId, clientSpanId);
@@ -117,8 +119,8 @@ const server = http.createServer(async (req, res) => {
             callId,
             phase: "diagnostic",
             toolName: call.toolName,
-            arguments: call.arguments,
-            evidence: Array.from(new Set(call.evidence)),
+            arguments: call.arguments || {},
+            evidence: Array.from(new Set(call.evidence || [])),
             attempt: 1,
             traceparent
           };
@@ -127,9 +129,9 @@ const server = http.createServer(async (req, res) => {
         });
 
         const state: StoredState = {
-          runId: payload.runId,
-          profile: payload.profile,
-          publicMarker: payload.publicMarker,
+          runId: fullPayload.runId,
+          profile: fullPayload.profile,
+          publicMarker: fullPayload.publicMarker || "",
           status: "waiting",
           diagnosis: plan.diagnosis,
           suppressed: [],
@@ -137,14 +139,14 @@ const server = http.createServer(async (req, res) => {
           approvals: [],
           actionLog: [...dispatches],
           receiptLog: [],
-          policy: payload.policy,
-          toolCatalog: payload.toolCatalog,
+          policy: fullPayload.policy,
+          toolCatalog: fullPayload.toolCatalog || [],
           pendingDiagnosticActions: pendingDiagnostics,
           completedDiagnostics: new Map(),
           pendingEffect: plan.suggestedEffect ? {
-            actionId: `act_eff_${payload.runId.slice(0, 8)}_${generateRandomHex(8)}`,
+            actionId: `act_eff_${fullPayload.runId.slice(0, 8)}_${generateRandomHex(8)}`,
             toolName: plan.suggestedEffect.toolName,
-            arguments: plan.suggestedEffect.arguments
+            arguments: plan.suggestedEffect.arguments || {}
           } : undefined,
           traceId: traceCtx.traceId,
           parentSpanId: traceCtx.parentSpanId,
@@ -166,11 +168,11 @@ const server = http.createServer(async (req, res) => {
           }]);
         }
 
-        stateStore.set(payload.runId, state);
+        stateStore.set(fullPayload.runId, state);
         return sendJsonResponse(res, 200, cleanResponse(state));
       }
 
-      // POST /v2/incidents/{runId}/receipts
+      // Route: POST /v2/incidents/{runId}/receipts
       if (method === 'POST' && urlParts[2] === 'incidents' && urlParts[4] === 'receipts') {
         const runId = urlParts[3];
         const state = stateStore.get(runId);
@@ -182,14 +184,14 @@ const server = http.createServer(async (req, res) => {
         try {
           receiptPayload = JSON.parse(bodyText || '{}');
         } catch {
-          return sendJsonResponse(res, 400, { error: "Invalid receipt JSON" });
+          return sendJsonResponse(res, 400, { error: "Invalid receipt JSON format" });
         }
 
         const receiptHash = computeSHA256Hex(receiptPayload);
 
         if (receiptStore.has(receiptPayload.receiptId)) {
           if (receiptStore.get(receiptPayload.receiptId) !== receiptHash) {
-            return sendJsonResponse(res, 409, { error: "Conflict: receiptId already exists with a different payload" });
+            return sendJsonResponse(res, 409, { error: "Conflict: receiptId exists with a different payload" });
           }
           return sendJsonResponse(res, 200, cleanResponse(state));
         }
@@ -299,7 +301,8 @@ const server = http.createServer(async (req, res) => {
         if (state.pendingDiagnosticActions.size === 0 && state.status === "waiting") {
           if (state.pendingEffect) {
             const toolName = state.pendingEffect.toolName;
-            const requiresApproval = state.policy.approvalRequiredFor.includes(toolName);
+            const approvalList = state.policy?.approvalRequiredFor || [];
+            const requiresApproval = approvalList.includes(toolName);
 
             if (requiresApproval) {
               const approvalId = `app_${generateRandomHex(12)}`;
@@ -351,7 +354,7 @@ const server = http.createServer(async (req, res) => {
         return sendJsonResponse(res, 200, cleanResponse(state));
       }
 
-      // GET /v2/incidents/{runId}
+      // Route: GET /v2/incidents/{runId}
       if (method === 'GET' && urlParts[2] === 'incidents' && urlParts[3]) {
         const runId = urlParts[3];
         const state = stateStore.get(runId);
@@ -361,14 +364,14 @@ const server = http.createServer(async (req, res) => {
         return sendJsonResponse(res, 200, cleanResponse(state));
       }
 
-      sendJsonResponse(res, 404, { error: "Endpoint not found" });
+      return sendJsonResponse(res, 404, { error: "Endpoint not found" });
     } catch (err: any) {
-      sendJsonResponse(res, 500, { error: err.message || "Internal Error" });
+      return sendJsonResponse(res, 500, { error: err?.message || "Internal Server Error" });
     }
   });
 });
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`Incident Response Agent active on port ${PORT}`);
+  console.log(`Incident Response Agent running on port ${PORT}`);
 });
