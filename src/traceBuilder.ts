@@ -30,14 +30,14 @@ export function buildOtlpTrace(state: StoredState): any {
     traceId,
     spanId: invokeSpanId,
     parentSpanId: agentSpanId,
-    name: `invoke_agent ${state.policy ? "incident-response" : "agent"}`,
+    name: "invoke_agent incident-response",
     kind: 1, // INTERNAL
     startTimeUnixNano: state.startTimeUnixNano + 1000,
     endTimeUnixNano: now - 1000,
     attributes: [...defaultAttrs]
   });
 
-  // 3. CLIENT chat incident-plan (Exactly one)
+  // 3. CLIENT chat incident-plan
   const chatSpanId = "chat_" + agentSpanId.slice(5);
   spans.push({
     traceId,
@@ -50,20 +50,19 @@ export function buildOtlpTrace(state: StoredState): any {
     attributes: [
       ...defaultAttrs,
       { key: "gen_ai.operation.name", value: { stringValue: "chat" } },
-      { key: "gen_ai.request.model", value: { stringValue: "gemini-2.5-flash" } }
+      { key: "gen_ai.request.model", value: { stringValue: process.env.MODEL_NAME || "openai/gpt-4.1-nano" } }
     ]
   });
 
   const diagnosticActionIds: string[] = [];
 
-  // 4. Executed Tool Actions
+  // 4. Executed Tool Spans
   for (const dispatch of state.actionLog) {
     const logicalSpanId = dispatch.actionId.slice(0, 16).padStart(16, 'b');
     if (dispatch.phase === "diagnostic") {
       diagnosticActionIds.push(logicalSpanId);
     }
 
-    // INTERNAL execute_tool
     spans.push({
       traceId,
       spanId: logicalSpanId,
@@ -81,7 +80,6 @@ export function buildOtlpTrace(state: StoredState): any {
       ]
     });
 
-    // CLIENT POST tool/<toolName> per physical attempt
     const attemptsInfo = state.toolSpans.get(dispatch.actionId) || [];
     for (const att of attemptsInfo) {
       const clientAttrs: any[] = [
@@ -124,7 +122,7 @@ export function buildOtlpTrace(state: StoredState): any {
     }
   }
 
-  // 5. INTERNAL incident.join (when multiple diagnostics fan out)
+  // 5. INTERNAL incident.join
   if (diagnosticActionIds.length > 1) {
     const joinSpanId = "join_" + agentSpanId.slice(5);
     spans.push({
@@ -140,7 +138,7 @@ export function buildOtlpTrace(state: StoredState): any {
     });
   }
 
-  // 6. INTERNAL approval_gate (when approval is required)
+  // 6. INTERNAL approval_gate
   for (const r of state.receiptLog) {
     if (r.approvalId) {
       const appSpanId = "appr_" + r.approvalId.slice(0, 11).padStart(11, 'c');
