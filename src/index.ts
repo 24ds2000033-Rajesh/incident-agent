@@ -55,7 +55,22 @@ const server = http.createServer(async (req, res) => {
     try {
       // POST /v2/incidents
       if (method === 'POST' && req.url === '/v2/incidents') {
-        const payload: IncidentPayload = JSON.parse(bodyText);
+        let payload: IncidentPayload;
+        try {
+          payload = JSON.parse(bodyText);
+        } catch {
+          return sendJsonResponse(res, 400, { error: "Invalid JSON body" });
+        }
+
+        // Profile validation probe test
+        if (payload.profile !== "ga5-incident-agent/v2") {
+          return sendJsonResponse(res, 422, { error: "Unsupported profile" });
+        }
+
+        if (!payload.runId || !payload.incident || !payload.policy) {
+          return sendJsonResponse(res, 400, { error: "Missing required incident fields" });
+        }
+
         const incomingHash = computeSHA256Hex(payload);
 
         if (stateStore.has(payload.runId)) {
@@ -156,7 +171,13 @@ const server = http.createServer(async (req, res) => {
           return sendJsonResponse(res, 404, { error: "Run not found" });
         }
 
-        const receiptPayload: OutcomeReceipt = JSON.parse(bodyText);
+        let receiptPayload: OutcomeReceipt;
+        try {
+          receiptPayload = JSON.parse(bodyText);
+        } catch {
+          return sendJsonResponse(res, 400, { error: "Invalid receipt JSON" });
+        }
+
         const receiptHash = computeSHA256Hex(receiptPayload);
 
         if (receiptStore.has(receiptPayload.receiptId)) {
@@ -342,5 +363,5 @@ const server = http.createServer(async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`AI Incident Agent listening on port ${PORT}`);
+  console.log(`Incident Response Agent active on port ${PORT}`);
 });
