@@ -1,5 +1,17 @@
-"scripts": {
-  "build": "tsc",
-  "start": "node dist/index.js",
-  "dev": "tsx watch src/index.ts"
+{
+  "name": "incident-agent",
+  "version": "1.0.0",
+  "description": "AI Incident Response Agent",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.0.0",
+    "tsx": "^4.0.0"
+  }
 }
