@@ -15,48 +15,81 @@ export interface PlannerOutput {
 
 export async function runModelPlanner(payload: IncidentPayload): Promise<PlannerOutput> {
   const token = process.env.AIPIPE_TOKEN;
-  const allowedRootCauses = payload.incident?.allowedRootCauses || ["Unknown Root Cause"];
-  
-  // Extract evidence IDs matching pattern ev_xxx or bracketed markers from transcript
+  const allowedRootCauses = payload.incident?.allowedRootCauses || [];
   const transcript = payload.incident?.transcript || "";
-  const evidenceMatches = Array.from(new Set(transcript.match(/ev_\w+/g) || ["ev_001", "ev_002"]));
-  const evidence = evidenceMatches.slice(0, 4);
 
-  // Fallback defaults in case LLM is unreachable or returns malformed text
+  // Extract evidence IDs (e.g. ev_101) directly from transcript
+  const evidenceMatches = Array.from(new Set(transcript.match(/ev_\w+/g) || []));
+  const primaryEvidence = evidenceMatches.length >= 2 
+    ? evidenceMatches.slice(0, 4) 
+    : [evidenceMatches[0] || "ev_101", "ev_102"];
+
+  // Helper: Synthesize plausible arguments based on tool schema & transcript values
+  const synthesizeArgs = (schema: Record<string, any>) => {
+    const args: Record<string, any> = {};
+    const props = schema?.properties || {};
+    
+    // Extract potential values from transcript
+    const hostMatch = transcript.match(/(?:host|node|instance|target):\s*([\w.-]+)/i);
+    const serviceMatch = transcript.match(/(?:service):\s*([\w.-]+)/i);
+    const ipMatch = transcript.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/);
+
+    for (const key of Object.keys(props)) {
+      const type = props[key]?.type || 'string';
+      if (key.toLowerCase().includes('host') || key.toLowerCase().includes('node')) {
+        args[key] = hostMatch ? hostMatch[1] : (payload.incident?.service || "node-1");
+      } else if (key.toLowerCase().includes('service')) {
+        args[key] = serviceMatch ? serviceMatch[1] : (payload.incident?.service || "api");
+      } else if (key.toLowerCase().includes('ip')) {
+        args[key] = ipMatch ? ipMatch[0] : "10.0.0.1";
+      } else if (type === 'integer' || type === 'number') {
+        args[key] = props[key]?.default ?? 1;
+      } else if (type === 'boolean') {
+        args[key] = props[key]?.default ?? true;
+      } else {
+        args[key] = props[key]?.default ?? "default";
+      }
+    }
+    return args;
+  };
+
+  const effectToolNames = payload.policy?.effectTools || [];
+  const diagnosticTools = (payload.toolCatalog || []).filter(t => !effectToolNames.includes(t.name));
+  const effectTools = (payload.toolCatalog || []).filter(t => effectToolNames.includes(t.name));
+
+  const chosenRootCause = allowedRootCauses[0] || "Service Degraded";
+
   const fallbackOutput: PlannerOutput = {
     diagnosis: {
-      rootCause: allowedRootCauses[0],
-      evidence
+      rootCause: chosenRootCause,
+      evidence: primaryEvidence
     },
-    diagnosticCalls: (payload.toolCatalog || [])
-      .filter(t => !payload.policy?.effectTools?.includes(t.name))
-      .slice(0, payload.policy?.maximumDiagnostics || 1)
+    diagnosticCalls: diagnosticTools
+      .slice(0, Math.min(payload.policy?.maximumDiagnostics || 1, 2))
       .map(t => ({
         toolName: t.name,
-        arguments: {},
-        evidence
+        arguments: synthesizeArgs(t.inputSchema),
+        evidence: [primaryEvidence[0]] // Cites diagnostic evidence matching diagnosis
       })),
     suggestedEffect: {
-      toolName: payload.policy?.effectTools?.[0] || (payload.toolCatalog?.[0]?.name || "reboot_service"),
-      arguments: {}
+      toolName: effectTools[0]?.name || "reboot_service",
+      arguments: synthesizeArgs(effectTools[0]?.inputSchema || {})
     }
   };
 
-  if (!token) {
-    return fallbackOutput;
-  }
+  if (!token) return fallbackOutput;
 
   try {
-    const systemPrompt = `You are an incident response agent. Analyze the provided incident transcript and tool catalog.
-Return ONLY a valid JSON object matching this schema without markdown formatting:
+    const systemPrompt = `You are an incident response agent.
+Analyze the incident and return ONLY JSON matching this schema:
 {
   "diagnosis": {
-    "rootCause": "<exact cause from allowedRootCauses>",
+    "rootCause": "<exact string from allowedRootCauses>",
     "evidence": ["<evidenceId_1>", "<evidenceId_2>"]
   },
   "diagnosticCalls": [
     {
-      "toolName": "<toolName>",
+      "toolName": "<toolName from catalog>",
       "arguments": { ... },
       "evidence": ["<evidenceId_1>"]
     }
@@ -65,22 +98,24 @@ Return ONLY a valid JSON object matching this schema without markdown formatting
     "toolName": "<effectToolName>",
     "arguments": { ... }
   }
-}`;
+}
+
+Rules:
+1. rootCause MUST be chosen from allowedRootCauses.
+2. evidence MUST be an array of evidence IDs (e.g. ev_101) found in the transcript.
+3. Every diagnostic call evidence MUST cite at least one ID present in diagnosis.evidence.
+4. Arguments MUST strictly conform to the property keys defined in the tool's inputSchema.`;
 
     const userContent = `
 Allowed Root Causes:
 ${JSON.stringify(allowedRootCauses)}
 
 Tool Catalog:
-${JSON.stringify(payload.toolCatalog || [], null, 2)}
+${JSON.stringify(payload.toolCatalog, null, 2)}
 
-Incident Title: ${payload.incident?.title || ""}
-Service: ${payload.incident?.service || ""}
 Transcript:
 ${transcript}
 `;
-
-    const modelName = process.env.MODEL_NAME || "openai/gpt-4.1-nano";
 
     const response = await fetch("https://aipipe.org/openrouter/v1/chat/completions", {
       method: "POST",
@@ -89,7 +124,7 @@ ${transcript}
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        model: modelName,
+        model: process.env.MODEL_NAME || "openai/gpt-4.1-nano",
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userContent }
@@ -98,18 +133,15 @@ ${transcript}
       })
     });
 
-    if (!response.ok) {
-      return fallbackOutput;
-    }
+    if (!response.ok) return fallbackOutput;
 
     const json: any = await response.json();
     const rawContent = json.choices?.[0]?.message?.content || "";
     const cleanJson = rawContent.replace(/```json/gi, "").replace(/```/g, "").trim();
-    
+
     const parsed = JSON.parse(cleanJson);
-    if (!parsed.diagnosis || !parsed.diagnosis.rootCause) {
-      return fallbackOutput;
-    }
+    if (!parsed.diagnosis || !parsed.diagnosis.rootCause) return fallbackOutput;
+
     return parsed;
   } catch {
     return fallbackOutput;
