@@ -82,19 +82,15 @@ export interface StoredState {
   actionLog: Dispatch[];
   receiptLog: any[];
   
-  // Policy and catalogs
   policy: IncidentPayload["policy"];
   toolCatalog: IncidentPayload["toolCatalog"];
   pendingDiagnosticActions: Map<string, { callId: string; toolName: string; arguments: any; evidence: string[] }>;
   completedDiagnostics: Map<string, { resultClass: string; status: number }>;
   pendingEffect?: { actionId: string; toolName: string; arguments: any };
   
-  // Trace metadata
   traceId: string;
   parentSpanId?: string;
-  tracestate?: string;
   
-  // Timing state for OTLP trace
   startTimeUnixNano: number;
   modelStartTimeUnixNano?: number;
   modelEndTimeUnixNano?: number;
