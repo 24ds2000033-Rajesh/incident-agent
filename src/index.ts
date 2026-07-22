@@ -57,26 +57,28 @@ const server = http.createServer(async (req, res) => {
       if (method === 'POST' && req.url === '/v2/incidents') {
         let payload: IncidentPayload;
         try {
-          payload = JSON.parse(bodyText);
+          payload = JSON.parse(bodyText || '{}');
         } catch {
           return sendJsonResponse(res, 400, { error: "Invalid JSON body" });
         }
 
-        // Profile validation probe test
-        if (payload.profile !== "ga5-incident-agent/v2") {
+        // 1. Validation Probe: Profile Check
+        if (!payload.profile || payload.profile !== "ga5-incident-agent/v2") {
           return sendJsonResponse(res, 422, { error: "Unsupported profile" });
         }
 
+        // 2. Validation Probe: Required Fields Check
         if (!payload.runId || !payload.incident || !payload.policy) {
           return sendJsonResponse(res, 400, { error: "Missing required incident fields" });
         }
 
         const incomingHash = computeSHA256Hex(payload);
 
+        // 3. Validation Probe: Conflict Check (HTTP 409)
         if (stateStore.has(payload.runId)) {
           const existing = stateStore.get(payload.runId)!;
           if (existing.incomingHash !== incomingHash) {
-            return sendJsonResponse(res, 409, { error: "Conflict: runId exists with different payload" });
+            return sendJsonResponse(res, 409, { error: "Conflict: runId already exists with a different payload" });
           }
           return sendJsonResponse(res, 200, cleanResponse(existing));
         }
@@ -85,7 +87,12 @@ const server = http.createServer(async (req, res) => {
         const traceCtx = parseTraceparent(req.headers['traceparent'] as string);
 
         const modelStart = getCurrentUnixNano();
-        const plan = await runModelPlanner(payload);
+        let plan;
+        try {
+          plan = await runModelPlanner(payload);
+        } catch (planError: any) {
+          return sendJsonResponse(res, 500, { error: `Planner failure: ${planError.message}` });
+        }
         const modelEnd = getCurrentUnixNano();
 
         const pendingDiagnostics = new Map();
@@ -173,7 +180,7 @@ const server = http.createServer(async (req, res) => {
 
         let receiptPayload: OutcomeReceipt;
         try {
-          receiptPayload = JSON.parse(bodyText);
+          receiptPayload = JSON.parse(bodyText || '{}');
         } catch {
           return sendJsonResponse(res, 400, { error: "Invalid receipt JSON" });
         }
@@ -182,7 +189,7 @@ const server = http.createServer(async (req, res) => {
 
         if (receiptStore.has(receiptPayload.receiptId)) {
           if (receiptStore.get(receiptPayload.receiptId) !== receiptHash) {
-            return sendJsonResponse(res, 409, { error: "Conflict: receiptId exists with different payload" });
+            return sendJsonResponse(res, 409, { error: "Conflict: receiptId already exists with a different payload" });
           }
           return sendJsonResponse(res, 200, cleanResponse(state));
         }
