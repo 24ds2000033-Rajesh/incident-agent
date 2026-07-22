@@ -8,9 +8,8 @@ import {
 import { runModelPlanner } from './planner.js';
 import { buildOtlpTrace } from './traceBuilder.js';
 
-// In-memory store (persist across request replays within process lifetime)
 const stateStore = new Map<string, StoredState>();
-const receiptStore = new Map<string, string>(); // receiptId -> payloadHash
+const receiptStore = new Map<string, string>();
 
 function sendJsonResponse(res: http.ServerResponse, statusCode: number, data: any) {
   const body = JSON.stringify(data);
@@ -54,7 +53,7 @@ const server = http.createServer(async (req, res) => {
   req.on('data', chunk => { bodyText += chunk; });
   req.on('end', async () => {
     try {
-      // 1. POST /v2/incidents
+      // POST /v2/incidents
       if (method === 'POST' && req.url === '/v2/incidents') {
         const payload: IncidentPayload = JSON.parse(bodyText);
         const incomingHash = computeSHA256Hex(payload);
@@ -70,7 +69,6 @@ const server = http.createServer(async (req, res) => {
         const startNano = getCurrentUnixNano();
         const traceCtx = parseTraceparent(req.headers['traceparent'] as string);
 
-        // Run Model Planning
         const modelStart = getCurrentUnixNano();
         const plan = await runModelPlanner(payload);
         const modelEnd = getCurrentUnixNano();
@@ -135,7 +133,6 @@ const server = http.createServer(async (req, res) => {
           incomingHash
         };
 
-        // Record initial client spans
         for (const d of dispatches) {
           const clientSpanId = d.traceparent.split('-')[2];
           state.toolSpans.set(d.actionId, [{
@@ -151,7 +148,7 @@ const server = http.createServer(async (req, res) => {
         return sendJsonResponse(res, 200, cleanResponse(state));
       }
 
-      // 2. POST /v2/incidents/{runId}/receipts
+      // POST /v2/incidents/{runId}/receipts
       if (method === 'POST' && urlParts[2] === 'incidents' && urlParts[4] === 'receipts') {
         const runId = urlParts[3];
         const state = stateStore.get(runId);
@@ -170,7 +167,6 @@ const server = http.createServer(async (req, res) => {
         }
         receiptStore.set(receiptPayload.receiptId, receiptHash);
 
-        // Process outcomes (Diagnostic or Effect execution results)
         if (receiptPayload.outcomes) {
           for (const outcome of receiptPayload.outcomes) {
             state.receiptLog.push({
@@ -193,7 +189,6 @@ const server = http.createServer(async (req, res) => {
               lastAtt.endTimeNano = getCurrentUnixNano();
             }
 
-            // Handle 503 Retry
             if (outcome.status === 503 && outcome.attempt === 1) {
               const prevDispatch = state.actionLog.find(a => a.actionId === outcome.actionId);
               if (prevDispatch) {
@@ -216,7 +211,6 @@ const server = http.createServer(async (req, res) => {
               }
             }
 
-            // Handle Timeout
             if (outcome.status === 0 || outcome.errorType === "timeout") {
               state.status = "failed";
               state.dispatches = [];
@@ -234,7 +228,6 @@ const server = http.createServer(async (req, res) => {
           }
         }
 
-        // Handle Approvals
         if (receiptPayload.approvals) {
           for (const app of receiptPayload.approvals) {
             state.receiptLog.push({
@@ -275,7 +268,6 @@ const server = http.createServer(async (req, res) => {
           }
         }
 
-        // Advance State Machine if all diagnostics are confirmed
         if (state.pendingDiagnosticActions.size === 0 && state.status === "waiting") {
           if (state.pendingEffect) {
             const toolName = state.pendingEffect.toolName;
@@ -297,7 +289,6 @@ const server = http.createServer(async (req, res) => {
               state.approvals = [approvalReq];
               return sendJsonResponse(res, 200, cleanResponse(state));
             } else {
-              // Non-destructive effect
               const nextClientSpanId = generateRandomHex(16);
               const effectDispatch: Dispatch = {
                 actionId: state.pendingEffect.actionId,
@@ -332,7 +323,7 @@ const server = http.createServer(async (req, res) => {
         return sendJsonResponse(res, 200, cleanResponse(state));
       }
 
-      // 3. GET /v2/incidents/{runId}
+      // GET /v2/incidents/{runId}
       if (method === 'GET' && urlParts[2] === 'incidents' && urlParts[3]) {
         const runId = urlParts[3];
         const state = stateStore.get(runId);
@@ -351,5 +342,5 @@ const server = http.createServer(async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`Incident Response Agent listening on port ${PORT}`);
+  console.log(`AI Incident Agent listening on port ${PORT}`);
 });
