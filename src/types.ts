@@ -82,19 +82,19 @@ export interface StoredState {
   actionLog: Dispatch[];
   receiptLog: any[];
   
-  // Internal execution state tracking
+  // Policy and catalogs
   policy: IncidentPayload["policy"];
   toolCatalog: IncidentPayload["toolCatalog"];
   pendingDiagnosticActions: Map<string, { callId: string; toolName: string; arguments: any; evidence: string[] }>;
   completedDiagnostics: Map<string, { resultClass: string; status: number }>;
   pendingEffect?: { actionId: string; toolName: string; arguments: any };
   
-  // Trace context
+  // Trace metadata
   traceId: string;
   parentSpanId?: string;
   tracestate?: string;
   
-  // Timing state for trace generation
+  // Timing state for OTLP trace
   startTimeUnixNano: number;
   modelStartTimeUnixNano?: number;
   modelEndTimeUnixNano?: number;
@@ -109,6 +109,5 @@ export interface StoredState {
     errorType?: string;
   }>>;
   
-  // Original incoming payload hash for conflict detection
   incomingHash: string;
 }
